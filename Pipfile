@@ -5,8 +5,10 @@ name = "pypi"
 
 [packages]
 numpy = ">=1.24"
-# mlx is Apple Silicon only; install manually: pip install mlx
-# mlx = {version = ">=0.10", markers = "sys_platform == 'darwin' and platform_machine == 'arm64'"}
+# GPU backends (all optional — install the one matching your hardware):
+# mlx = {version = ">=0.10", markers = "sys_platform == 'darwin' and platform_machine == 'arm64'"}  # Apple Silicon
+# cupy-cuda12x = ">=13.0"  # NVIDIA CUDA 12.x  (or cupy-cuda11x for CUDA 11)
+# jax = {version = ">=0.4.20", extras = ["cuda12"]}  # NVIDIA via JAX, or: pip install jax jax-metal (Apple), jax[rocm] (AMD)
 
 [dev-packages]
 pytest = ">=7.0"

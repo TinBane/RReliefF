@@ -1,11 +1,12 @@
-"""Tests for GPU-accelerated Relief implementations.
+"""Tests for GPU-accelerated Relief implementations (multi-backend).
 
 These tests verify that the vectorized GPU implementations (relieff_gpu.py)
 produce results consistent with the original loop-based implementations
 and correctly identify predictive features.
 
-On non-Apple platforms, these tests exercise the vectorized NumPy fallback,
-which uses the same algorithm and code paths (just runs on CPU).
+On this platform, the NumPy fallback backend is exercised. The same
+vectorized algorithm runs identically on MLX, CuPy, JAX, and NumPy
+through the _Ops abstraction layer.
 """
 
 import numpy as np
@@ -17,6 +18,11 @@ from relieff_gpu import (
     Relief_gpu,
     _get_backend,
     _HAS_MLX,
+    _HAS_CUPY,
+    _HAS_JAX,
+    _VALID_BACKENDS,
+    available_backends,
+    set_backend,
 )
 from relieff import RReliefF, ReliefF, Relief
 
@@ -78,19 +84,68 @@ def multiclass_classification():
 
 
 # ---------------------------------------------------------------------------
-# Backend detection test
+# Backend detection and management tests
 # ---------------------------------------------------------------------------
 
 class TestBackend:
     def test_backend_returns_valid_string(self):
         backend = _get_backend()
-        assert backend in ("mlx", "numpy")
+        assert backend in _VALID_BACKENDS
 
-    def test_mlx_detection_consistent(self):
+    def test_available_backends_includes_numpy(self):
+        backends = available_backends()
+        assert "numpy" in backends
+
+    def test_available_backends_consistent_with_flags(self):
+        backends = available_backends()
         if _HAS_MLX:
-            assert _get_backend() == "mlx"
+            assert "mlx" in backends
         else:
-            assert _get_backend() == "numpy"
+            assert "mlx" not in backends
+        if _HAS_CUPY:
+            assert "cupy" in backends
+        else:
+            assert "cupy" not in backends
+        if _HAS_JAX:
+            assert "jax" in backends
+        else:
+            assert "jax" not in backends
+
+    def test_set_backend_numpy(self):
+        """Can always switch to numpy backend."""
+        set_backend("numpy")
+        assert _get_backend() == "numpy"
+        set_backend(None)  # restore auto-detection
+
+    def test_set_backend_none_restores_auto(self):
+        set_backend("numpy")
+        assert _get_backend() == "numpy"
+        set_backend(None)
+        # After reset, should auto-detect (whatever is available)
+        assert _get_backend() in _VALID_BACKENDS
+
+    def test_set_backend_invalid_raises(self):
+        with pytest.raises(ValueError, match="Unknown backend"):
+            set_backend("opencl")
+
+    def test_set_backend_unavailable_raises(self):
+        """Requesting an uninstalled backend raises ImportError."""
+        # Find a backend that is NOT installed
+        for name in ("mlx", "cupy", "jax"):
+            avail = {"mlx": _HAS_MLX, "cupy": _HAS_CUPY, "jax": _HAS_JAX}
+            if not avail[name]:
+                with pytest.raises(ImportError, match=name):
+                    set_backend(name)
+                break
+
+    def test_set_backend_affects_computation(self, binary_classification):
+        """Switching to numpy backend still produces correct results."""
+        X, y = binary_classification
+        set_backend("numpy")
+        W = Relief_gpu(X, y)
+        set_backend(None)
+        assert W.shape == (X.shape[1], 1)
+        assert W.ravel()[0] > W.ravel()[1]
 
 
 # ---------------------------------------------------------------------------
@@ -290,3 +345,35 @@ class TestGPUOriginalConsistency:
         rank_gpu = np.argsort(W_gpu.ravel())
         rank_orig = np.argsort(W_orig.ravel())
         np.testing.assert_array_equal(rank_gpu, rank_orig)
+
+
+# ---------------------------------------------------------------------------
+# Explicit numpy backend tests (ensures forced-numpy path works correctly)
+# ---------------------------------------------------------------------------
+
+class TestNumpyBackendExplicit:
+    """Run key tests with the numpy backend explicitly forced."""
+
+    def test_rrelieff_numpy_backend(self, regression_2d_quadratic):
+        X, y = regression_2d_quadratic
+        set_backend("numpy")
+        W = RReliefF_gpu(X, y, k=10, sigma=30)
+        set_backend(None)
+        weights = W.ravel()
+        assert weights[0] > weights[2]
+
+    def test_relieff_numpy_backend(self, multiclass_classification):
+        X, y = multiclass_classification
+        set_backend("numpy")
+        W = ReliefF_gpu(X, y, k=10)
+        set_backend(None)
+        weights = W.ravel()
+        assert weights[0] > weights[1]
+
+    def test_relief_numpy_backend(self, binary_classification):
+        X, y = binary_classification
+        set_backend("numpy")
+        W = Relief_gpu(X, y)
+        set_backend(None)
+        weights = W.ravel()
+        assert weights[0] > weights[1]

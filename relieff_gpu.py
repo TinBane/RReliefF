@@ -1,13 +1,15 @@
-"""GPU-accelerated Relief-based feature selection using Apple MLX (Metal).
+"""GPU-accelerated Relief-based feature selection with multi-backend support.
 
 This module provides fully vectorized implementations of RReliefF, ReliefF,
-and Relief that run on Apple Silicon GPUs via the MLX framework. On non-Apple
-hardware, it falls back to a vectorized NumPy implementation that is still
-significantly faster than the loop-based original.
+and Relief that run on GPU hardware from multiple vendors:
 
-Requirements:
-    - Apple Silicon (M1/M2/M3/M4): pip install mlx
-    - Other platforms: uses vectorized NumPy fallback automatically
+    - Apple Metal (M1/M2/M3/M4) via MLX  — pip install mlx
+    - NVIDIA CUDA via CuPy                — pip install cupy-cuda12x
+    - Any GPU (NVIDIA/AMD/Apple/TPU) via JAX — pip install jax jaxlib
+    - CPU fallback via vectorized NumPy    — always available
+
+Backend priority: MLX > CuPy > JAX > NumPy (auto-detected).
+Override with: set_backend("jax"), set_backend("cupy"), etc.
 
 Usage:
     from relieff_gpu import RReliefF_gpu, ReliefF_gpu, Relief_gpu
@@ -25,32 +27,102 @@ NDFloat = npt.NDArray[np.float64]
 
 # --- Backend detection ---
 
+_HAS_MLX = False
+_HAS_CUPY = False
+_HAS_JAX = False
+
 try:
     import mlx.core as mx
-
     _HAS_MLX = True
 except ImportError:
-    _HAS_MLX = False
+    pass
+
+try:
+    import cupy as cp
+    _HAS_CUPY = True
+except ImportError:
+    pass
+
+try:
+    import jax
+    import jax.numpy as jnp
+    _HAS_JAX = True
+except ImportError:
+    pass
+
+# User-overridable backend selection
+_BACKEND_OVERRIDE: str | None = None
+
+_VALID_BACKENDS = ("mlx", "cupy", "jax", "numpy")
+
+
+def set_backend(name: str | None) -> None:
+    """Override the auto-detected backend.
+
+    Parameters
+    ----------
+    name : str or None
+        One of 'mlx', 'cupy', 'jax', 'numpy', or None (auto-detect).
+
+    Raises
+    ------
+    ValueError
+        If name is not a recognised backend.
+    ImportError
+        If the requested backend is not installed.
+    """
+    global _BACKEND_OVERRIDE
+    if name is None:
+        _BACKEND_OVERRIDE = None
+        return
+    if name not in _VALID_BACKENDS:
+        raise ValueError(f"Unknown backend {name!r}. Choose from {_VALID_BACKENDS}")
+    avail = {"mlx": _HAS_MLX, "cupy": _HAS_CUPY, "jax": _HAS_JAX, "numpy": True}
+    if not avail[name]:
+        raise ImportError(f"Backend {name!r} is not installed")
+    _BACKEND_OVERRIDE = name
 
 
 def _get_backend() -> str:
-    """Return 'mlx' if MLX is available, else 'numpy'."""
-    return "mlx" if _HAS_MLX else "numpy"
+    """Return the name of the active backend.
+
+    Priority: user override > MLX > CuPy > JAX > NumPy.
+    """
+    if _BACKEND_OVERRIDE is not None:
+        return _BACKEND_OVERRIDE
+    if _HAS_MLX:
+        return "mlx"
+    if _HAS_CUPY:
+        return "cupy"
+    if _HAS_JAX:
+        return "jax"
+    return "numpy"
+
+
+def available_backends() -> list[str]:
+    """Return a list of backends that are installed and available."""
+    result = ["numpy"]  # always available
+    if _HAS_JAX:
+        result.append("jax")
+    if _HAS_CUPY:
+        result.append("cupy")
+    if _HAS_MLX:
+        result.append("mlx")
+    return result
 
 
 # ---------------------------------------------------------------------------
 # Array operations abstraction layer
 # ---------------------------------------------------------------------------
-# Provides a thin wrapper so the same vectorized algorithm can run on both
-# MLX (Apple Metal GPU) and NumPy (CPU fallback).
+# Provides a thin wrapper so the same vectorized algorithm can run on
+# MLX (Apple Metal), CuPy (NVIDIA CUDA), JAX (any GPU), or NumPy (CPU).
 
 
 class _Ops:
     """Array operations backend interface.
 
-    Uses Any types because the same interface serves both NumPy (NDFloat)
-    and MLX (mx.array) backends. The public API boundary always converts
-    back to NDFloat.
+    Uses Any types because the same interface serves multiple array libraries.
+    The public API boundary always converts back to NDFloat.
     """
 
     def array(self, x: Any) -> Any: raise NotImplementedError
@@ -71,7 +143,7 @@ class _Ops:
 
 
 class _NumpyOps(_Ops):
-    """NumPy backend for vectorized Relief operations."""
+    """NumPy backend (CPU). Always available."""
 
     def array(self, x: Any) -> Any:
         return np.asarray(x, dtype=np.float64)
@@ -120,11 +192,10 @@ class _NumpyOps(_Ops):
 
 
 class _MLXOps(_Ops):
-    """MLX backend for Apple Silicon GPU acceleration.
+    """MLX backend for Apple Silicon (Metal GPU).
 
-    All operations run on Metal GPU via lazy evaluation. Arrays use float32
-    (Metal does not support float64). Results are converted back to float64
-    numpy arrays at the boundary.
+    Uses float32 (Metal does not support float64). Results are converted
+    back to float64 numpy arrays at the API boundary.
     """
 
     def array(self, x: Any) -> Any:
@@ -176,11 +247,128 @@ class _MLXOps(_Ops):
         mx.eval(*args)
 
 
+class _CuPyOps(_Ops):
+    """CuPy backend for NVIDIA CUDA GPUs.
+
+    CuPy mirrors the NumPy API almost exactly, running on CUDA.
+    Uses float64 (NVIDIA GPUs support it natively).
+    """
+
+    def array(self, x: Any) -> Any:
+        return cp.asarray(x, dtype=cp.float64)
+
+    def zeros(self, shape: Any) -> Any:
+        return cp.zeros(shape, dtype=cp.float64)
+
+    def arange(self, n: int) -> Any:
+        return cp.arange(n)
+
+    def sum(self, x: Any, axis: Any = None, keepdims: bool = False) -> Any:
+        return cp.sum(x, axis=axis, keepdims=keepdims)
+
+    def abs(self, x: Any) -> Any:
+        return cp.abs(x)
+
+    def exp(self, x: Any) -> Any:
+        return cp.exp(x)
+
+    def max(self, x: Any, axis: Any = None, keepdims: bool = False) -> Any:
+        return cp.max(x, axis=axis, keepdims=keepdims)
+
+    def min(self, x: Any, axis: Any = None, keepdims: bool = False) -> Any:
+        return cp.min(x, axis=axis, keepdims=keepdims)
+
+    def argsort(self, x: Any, axis: int = -1) -> Any:
+        return cp.argsort(x, axis=axis)
+
+    def take_along_axis(self, x: Any, indices: Any, axis: int) -> Any:
+        return cp.take_along_axis(x, indices, axis=axis)
+
+    def expand_dims(self, x: Any, axis: int) -> Any:
+        return cp.expand_dims(x, axis=axis)
+
+    def unique(self, x: Any) -> Any:
+        return cp.unique(x)
+
+    def where(self, cond: Any, x: Any, y: Any) -> Any:
+        return cp.where(cond, x, y)
+
+    def to_numpy(self, x: Any) -> NDFloat:
+        return cp.asnumpy(x).astype(np.float64)
+
+    def eval(self, *args: Any) -> None:
+        cp.cuda.Stream.null.synchronize()
+
+
+class _JAXOps(_Ops):
+    """JAX backend for cross-platform GPU acceleration.
+
+    Supports NVIDIA (CUDA), AMD (ROCm), Apple (Metal via jax-metal),
+    Google TPU, and CPU. Uses JIT compilation for performance.
+    JAX arrays are immutable; operations build a computation trace
+    that is compiled and executed on the available accelerator.
+    """
+
+    def array(self, x: Any) -> Any:
+        return jnp.asarray(x, dtype=jnp.float32)
+
+    def zeros(self, shape: Any) -> Any:
+        return jnp.zeros(shape, dtype=jnp.float32)
+
+    def arange(self, n: int) -> Any:
+        return jnp.arange(n)
+
+    def sum(self, x: Any, axis: Any = None, keepdims: bool = False) -> Any:
+        return jnp.sum(x, axis=axis, keepdims=keepdims)
+
+    def abs(self, x: Any) -> Any:
+        return jnp.abs(x)
+
+    def exp(self, x: Any) -> Any:
+        return jnp.exp(x)
+
+    def max(self, x: Any, axis: Any = None, keepdims: bool = False) -> Any:
+        return jnp.max(x, axis=axis, keepdims=keepdims)
+
+    def min(self, x: Any, axis: Any = None, keepdims: bool = False) -> Any:
+        return jnp.min(x, axis=axis, keepdims=keepdims)
+
+    def argsort(self, x: Any, axis: int = -1) -> Any:
+        return jnp.argsort(x, axis=axis)
+
+    def take_along_axis(self, x: Any, indices: Any, axis: int) -> Any:
+        return jnp.take_along_axis(x, indices, axis=axis)
+
+    def expand_dims(self, x: Any, axis: int) -> Any:
+        return jnp.expand_dims(x, axis=axis)
+
+    def unique(self, x: Any) -> Any:
+        # jnp.unique requires fixed-size output; use numpy for label discovery
+        return jnp.asarray(np.unique(np.asarray(x)))
+
+    def where(self, cond: Any, x: Any, y: Any) -> Any:
+        return jnp.where(cond, x, y)
+
+    def to_numpy(self, x: Any) -> NDFloat:
+        return np.asarray(x, dtype=np.float64)
+
+    def eval(self, *args: Any) -> None:
+        # JAX uses async dispatch; block until results are ready
+        for a in args:
+            a.block_until_ready()
+
+
+_OPS_MAP: dict[str, type[_Ops]] = {
+    "numpy": _NumpyOps,
+    "mlx": _MLXOps,
+    "cupy": _CuPyOps,
+    "jax": _JAXOps,
+}
+
+
 def _get_ops() -> _Ops:
-    """Return the appropriate ops backend."""
-    if _HAS_MLX:
-        return _MLXOps()
-    return _NumpyOps()
+    """Return the appropriate ops backend instance."""
+    return _OPS_MAP[_get_backend()]()
 
 
 # ---------------------------------------------------------------------------
@@ -247,8 +435,8 @@ def RReliefF_gpu(
 ) -> NDFloat:
     """GPU-accelerated RReliefF for regression feature selection.
 
-    Fully vectorized implementation that runs on Apple Metal GPU (via MLX)
-    or falls back to vectorized NumPy on other platforms.
+    Fully vectorized implementation that auto-selects the best available
+    backend: MLX (Apple Metal), CuPy (NVIDIA CUDA), JAX (any GPU), or NumPy.
 
     Parameters
     ----------
@@ -309,8 +497,8 @@ def RReliefF_gpu(
 
     # Gather neighbour features: X_neighbours[i, j, :] = X[knn_idx[i,j], :]
     # Shape: (n, k, p)
-    # We need to index X_g with knn_idx. Use advanced indexing.
-    knn_idx_np = np.array(knn_idx) if _HAS_MLX else knn_idx
+    # Convert indices to numpy for advanced indexing (works for all backends).
+    knn_idx_np = np.asarray(ops.to_numpy(knn_idx)) if _get_backend() != "numpy" else knn_idx
     X_knn_np = X_np[knn_idx_np.astype(int)]  # (n, k, p) in numpy
     y_knn_np = y_np[knn_idx_np.astype(int).ravel()].reshape(n, k)  # (n, k)
 
@@ -377,8 +565,8 @@ def ReliefF_gpu(
 ) -> NDFloat:
     """GPU-accelerated ReliefF for classification feature selection.
 
-    Fully vectorized implementation that runs on Apple Metal GPU (via MLX)
-    or falls back to vectorized NumPy on other platforms.
+    Fully vectorized implementation that auto-selects the best available
+    backend: MLX (Apple Metal), CuPy (NVIDIA CUDA), JAX (any GPU), or NumPy.
 
     Parameters
     ----------
@@ -495,8 +683,8 @@ def Relief_gpu(
 ) -> NDFloat:
     """GPU-accelerated Relief for binary classification feature selection.
 
-    Fully vectorized implementation that runs on Apple Metal GPU (via MLX)
-    or falls back to vectorized NumPy on other platforms.
+    Fully vectorized implementation that auto-selects the best available
+    backend: MLX (Apple Metal), CuPy (NVIDIA CUDA), JAX (any GPU), or NumPy.
 
     Parameters
     ----------
