@@ -97,6 +97,9 @@ def __probability_class(y, currentLabel):
 
 def RReliefF(X, y, updates='all', k=10, sigma=30, weight_track=False, categoricalx = False):
 
+    # Ensure y is 1D to avoid shape issues with numpy 2.x
+    y = np.asarray(y).ravel()
+
     # Check if user wants all values to be considered
     if updates == 'all':
         m = X.shape[0]
@@ -104,13 +107,13 @@ def RReliefF(X, y, updates='all', k=10, sigma=30, weight_track=False, categorica
         m = updates
 
     # The constants need for RReliefF
-    N_dC = 0
-    N_dA = np.zeros([X.shape[1],1])
-    N_dCanddA= np.zeros([X.shape[1],1])
-    W_A = np.zeros([X.shape[1],1])
+    N_dC = 0.0
+    N_dA = np.zeros(X.shape[1])
+    N_dCanddA = np.zeros(X.shape[1])
+    W_A = np.zeros(X.shape[1])
     Wtrack = np.zeros([m, X.shape[1]])
     yRange = np.max(y) - np.min(y)
-    iTrack = np.zeros([m,1])
+    iTrack = np.zeros([m, 1])
 
 
     # Check if the input is categorical
@@ -161,6 +164,9 @@ def RReliefF(X, y, updates='all', k=10, sigma=30, weight_track=False, categorica
     for A in range(X.shape[1]):
         W_A[A] = N_dCanddA[A]/N_dC - ((N_dA[A]-N_dCanddA[A])/(m-N_dC))
 
+    # Reshape to column vector for API compatibility
+    W_A = W_A.reshape(-1, 1)
+
     # Check if weight tracking is on
     if not weight_track:
         return W_A
@@ -169,18 +175,20 @@ def RReliefF(X, y, updates='all', k=10, sigma=30, weight_track=False, categorica
 
 
 def ReliefF(X, y, updates='all', k=10, sigma=30, weight_track=False, categoricalx=False):
+    # Ensure y is 1D to avoid shape issues with numpy 2.x
+    y = np.asarray(y).ravel()
+
     # Check if user wants all values to be considered
     if updates == 'all':
         m = X.shape[0]
     else:
         m = updates
 
-    # The constants need for RReliefF
+    # The constants need for ReliefF
 
-    W_A = np.zeros([X.shape[1], 1])
+    W_A = np.zeros(X.shape[1])
     Wtrack = np.zeros([m, X.shape[1]])
-    iTrack = np.zeros([m,1])
-    # yRange = np.max(y) - np.min(y)
+    iTrack = np.zeros([m, 1])
 
     # Find unique labels
     labels = np.unique(y)
@@ -213,9 +221,6 @@ def ReliefF(X, y, updates='all', k=10, sigma=30, weight_track=False, categorical
             XKNNCurrentMiss, neighbourIndexCurrentMiss = __knnsearchF(X, X[random_instance, :], k, y, missedLabels[n])
             XKNNMiss.append(XKNNCurrentMiss)
             neighbourIndexMiss.append(neighbourIndexCurrentMiss)
-        amrit = 2
-
-
         XRandomInstance = X[random_instance, :]
         yRandomInstance = y[random_instance]
 
@@ -246,6 +251,9 @@ def ReliefF(X, y, updates='all', k=10, sigma=30, weight_track=False, categorical
             # Track the weights
             Wtrack[i, A] = W_A[A]
 
+    # Reshape to column vector for API compatibility
+    W_A = W_A.reshape(-1, 1)
+
     # Check if weight tracking is on
     if not weight_track:
         return W_A
@@ -255,20 +263,22 @@ def ReliefF(X, y, updates='all', k=10, sigma=30, weight_track=False, categorical
 
 def Relief(X, y, updates='all', sigma=30, weight_track=False, categoricalx=False):
 
+    # Ensure y is 1D to avoid shape issues with numpy 2.x
+    y = np.asarray(y).ravel()
+
     # Check if user wants all values to be considered
     if updates == 'all':
         m = X.shape[0]
     else:
         m = updates
 
-    # The constants need for RReliefF
+    # The constants need for Relief
 
-    W_A = np.zeros([X.shape[1], 1])
+    W_A = np.zeros(X.shape[1])
     Wtrack = np.zeros([m, X.shape[1]])
     hitTrack = np.zeros([m, X.shape[1]])
     missTrack = np.zeros([m, X.shape[1]])
-    iTrack = np.zeros([m,1])
-    # yRange = np.max(y) - np.min(y)
+    iTrack = np.zeros([m, 1])
 
     # Check if the input is categorical
     if categoricalx:
@@ -306,6 +316,9 @@ def Relief(X, y, updates='all', sigma=30, weight_track=False, categoricalx=False
             Wtrack[i, A] = W_A[A]
             hitTrack[i, A] = __diff(A, XRandomInstance, XKNNHit[0], X) / m
             missTrack[i, A] = __diff(A, XRandomInstance, XKNNMiss[0], X) / m
+
+    # Reshape to column vector for API compatibility
+    W_A = W_A.reshape(-1, 1)
 
     # Check if weight tracking is on
     if not weight_track:
